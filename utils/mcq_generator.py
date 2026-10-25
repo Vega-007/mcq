@@ -56,7 +56,7 @@ Generate exactly {num_questions} MCQs now in JSON format:
 """
 
 
-def get_llm_instance(provider: str, api_key: str, temperature: float = 0.3):
+def get_llm_instance(provider: str, api_key: str, temperature: float = 0.3, model: Optional[str] = None):
     """
     Returns an instance of LLM based on provider ('gemini' or 'openai').
     """
@@ -66,8 +66,9 @@ def get_llm_instance(provider: str, api_key: str, temperature: float = 0.3):
             import os
             os.environ["GOOGLE_API_KEY"] = clean_key
         from langchain_google_genai import ChatGoogleGenerativeAI
+        target_model = model or "gemini-3.5-flash"
         return ChatGoogleGenerativeAI(
-            model="gemini-3.8-flash",
+            model=target_model,
             google_api_key=clean_key,
             temperature=temperature
         )
@@ -76,8 +77,9 @@ def get_llm_instance(provider: str, api_key: str, temperature: float = 0.3):
             import os
             os.environ["OPENAI_API_KEY"] = clean_key
         from langchain_openai import ChatOpenAI
+        target_model = model or "gpt-4o-mini"
         return ChatOpenAI(
-            model="gpt-4o-mini",
+            model=target_model,
             openai_api_key=clean_key,
             temperature=temperature
         )
@@ -162,9 +164,6 @@ def generate_mcqs_from_chunks(
         
     combined_context = "\n\n---\n\n".join(context_blocks)
 
-    # Initialize LLM
-    llm = get_llm_instance(provider=provider, api_key=api_key)
-
     # Build Prompt
     prompt = PromptTemplate(
         template=MCQ_PROMPT_TEMPLATE,
@@ -177,9 +176,32 @@ def generate_mcqs_from_chunks(
         context=combined_context
     )
 
-    # Invoke LLM
-    response = llm.invoke(formatted_prompt)
-    raw_content = response.content if hasattr(response, "content") else str(response)
+    # Invoke LLM with fallback candidates if quota is exceeded
+    models_to_try = [
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.8-flash"
+    ] if provider.lower() == "gemini" else ["gpt-4o-mini", "gpt-4o"]
+
+    raw_content = None
+    last_err = None
+
+    for m in models_to_try:
+        try:
+            llm = get_llm_instance(provider=provider, api_key=api_key, model=m)
+            response = llm.invoke(formatted_prompt)
+            raw_content = response.content if hasattr(response, "content") else str(response)
+            break
+        except Exception as e:
+            last_err = e
+            err_msg = str(e)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+                continue
+            raise e
+
+    if raw_content is None:
+        raise last_err or ValueError("Failed to obtain response from LLM.")
 
     # Clean & Parse JSON
     mcqs_raw = clean_json_response(raw_content)
